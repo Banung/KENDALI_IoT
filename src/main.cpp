@@ -5,13 +5,29 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+#include <SPI.h>
+#include <SD.h>
+#include <FS.h>
 
-// PIN DEFINITIONS
+// PIN DEFINITIONS - SENSORS & ACTUATORS
 #define PIN_DS18B20 4   // OneWire Digital Pin (DS18B20 Temperature)
-#define PIN_SOIL 1      // Analog ADC1_CH0 (Capacitive Soil Moisture)
-#define PIN_PH 2        // Analog ADC1_CH1 (pH-4502C Po Pin)
+#define PIN_SOIL 6      // Analog ADC1_CH5 (Capacitive Soil Moisture)
+#define PIN_PH 7        // Analog ADC1_CH6 (pH-4502C Po Pin)
 #define PIN_TDS 3       // Analog ADC1_CH2 (TDS & Conductivity)
 #define PIN_LED_ALERT 5 // Digital Output (Lampu Peringatan)
+
+// PIN DEFINITIONS - SPI MICROSD CARD (ESP32-S3)
+#define PIN_SD_CS 10   // Chip Select MicroSD
+#define PIN_SD_MOSI 11 // Master Out Slave In
+#define PIN_SD_SCK 12  // Serial Clock
+#define PIN_SD_MISO 13 // Master In Slave Out
+
+// pH-4502C KALIBRASI
+// Sesuaikan dua nilai berikut menggunakan larutan buffer pH 4.0 dan pH 7.0
+#define PH_VREF 3.3f // Tegangan referensi ESP32-S3 (volt)
+#define PH_ADC_MAX 4095.0f
+#define PH_NEUTRAL_VOLTAGE 2.5f // Tegangan output sensor saat pH = 7.0
+#define PH_VOLT_PER_UNIT 0.18f  // Volt per unit pH (~0.17–0.20, kalibrasi)
 
 // BLE DEFINITIONS
 #define BLE_DEVICE_NAME "KENDALI_IoT"
@@ -22,6 +38,10 @@ BLEServer *pServer = nullptr;
 BLECharacteristic *pCharacteristicTx = nullptr;
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
+
+// MICROSD OFFLINE BUFFER DEFINITIONS
+const char *OFFLINE_DATA_FILE = "/offline_data.txt";
+bool sdAvailable = false;
 
 class MyServerCallbacks : public BLEServerCallbacks
 {
@@ -51,17 +71,27 @@ long tdsSampleSum = 0;
 // Timing intervals
 unsigned long lastDashboardTime = 0;
 unsigned long lastTdsSampleTime = 0;
-const unsigned long DASHBOARD_INTERVAL = 1000; // Kirim data setiap 1 detik
+unsigned long lastOfflineLogTime = 0;
+const unsigned long DASHBOARD_INTERVAL = 1000; // Pembacaan sensor & refresh Serial setiap 1 detik
 const unsigned long TDS_SAMPLE_INTERVAL = 50;  // Sample TDS setiap 50ms
+
+// Interval pencatatan ke MicroSD saat HP terputus
+// Saat ini diatur 1000ms (1 detik) untuk tahap debugging.
+// Untuk produksi jangka panjang di lahan, ubah ke: 600000UL (10 menit)
+const unsigned long OFFLINE_LOG_INTERVAL = 1000;
 
 // FUNCTION DECLARATIONS
 void initBLE();
+bool initSD();
+void saveOfflineData(const char *payload);
+void syncOfflineData();
 void updateTdsBuffer();
 float getAverageTdsADC();
+void buildTelemetryJson(char *buffer, size_t maxLen, float temp, float soilPct, int soilRaw, float phVal, float tdsPpm, float ec, bool isCritical);
 void printDashboard(float temp, int soilRaw, float soilPct, const char *soilStatus, bool isCritical,
                     int phRaw, float phVal, const char *phStatus,
                     float avgTdsADC, float conductivity, float tdsPpm);
-void sendBleTelemetry(float temp, float soilPct, int soilRaw, float phVal, float tdsPpm, float ec, bool isCritical);
+void sendBleTelemetry(const char *payload);
 
 void setup()
 {
@@ -83,13 +113,16 @@ void setup()
 
   // ADC Resolution
   analogReadResolution(12);
-  Serial.println("[OK] ADC Analog Siap (Soil: GPIO 1, pH: GPIO 2, TDS: GPIO 3)");
+  Serial.println("[OK] ADC Analog Siap (Soil: GPIO 6, pH: GPIO 7, TDS: GPIO 3)");
 
   // TDS buffer
   for (int i = 0; i < NUM_TDS_SAMPLES; i++)
   {
     tdsSamples[i] = 0;
   }
+
+  // MicroSD Card Init
+  sdAvailable = initSD();
 
   // Bluetooth Low Energy
   initBLE();
@@ -111,6 +144,8 @@ void loop()
   if (deviceConnected && !oldDeviceConnected)
   {
     oldDeviceConnected = deviceConnected;
+    // HP baru saja terhubung: sinkronisasi data offline dari MicroSD ke HP
+    syncOfflineData();
   }
 
   // Periodically sample TDS to maintain smooth moving average
@@ -140,10 +175,17 @@ void loop()
     // Kontrol Lampu Peringatan
     digitalWrite(PIN_LED_ALERT, isCritical ? HIGH : LOW);
 
-    // Read pH Sensor
+    // Read pH Sensor (pH-4502C)
+    // Konversi ADC → Tegangan → pH menggunakan konstanta kalibrasi di atas
     int phRaw = analogRead(PIN_PH);
-    // Formula pendekatan pH (skala 0 - 14 dari tegangan ADC 12-bit)
-    float phValue = ((float)phRaw * 14.0) / 4095.0;
+    float phVoltage = ((float)phRaw / PH_ADC_MAX) * PH_VREF;
+    float phValue = 7.0f + ((PH_NEUTRAL_VOLTAGE - phVoltage) / PH_VOLT_PER_UNIT);
+    // Clamp ke range valid pH (0–14)
+    if (phValue < 0.0f)
+      phValue = 0.0f;
+    if (phValue > 14.0f)
+      phValue = 14.0f;
+
     const char *phStatus;
     if (phValue < 6.5)
     {
@@ -168,12 +210,121 @@ void loop()
                    phRaw, phValue, phStatus,
                    avgTdsADC, conductivity, tdsPpm);
 
-    // Kirim Data via BLE ke Aplikasi KENDALI di HP Petani
-    sendBleTelemetry(tempC, soilPercent, soilRaw, phValue, tdsPpm, conductivity, isCritical);
+    // Format payload JSON telemetri
+    char payload[160];
+    buildTelemetryJson(payload, sizeof(payload), tempC, soilPercent, soilRaw, phValue, tdsPpm, conductivity, isCritical);
+
+    // Jika HP terhubung, kirim secara real-time via BLE
+    if (deviceConnected)
+    {
+      sendBleTelemetry(payload);
+    }
+    // Jika HP tidak terhubung, simpan ke MicroSD Card sesuai interval offline
+    else
+    {
+      if (currentMillis - lastOfflineLogTime >= OFFLINE_LOG_INTERVAL)
+      {
+        lastOfflineLogTime = currentMillis;
+        saveOfflineData(payload);
+      }
+    }
   }
 }
 
 // HELPER FUNCTIONS
+bool initSD()
+{
+  Serial.println("[SD] Menginisialisasi modul MicroSD Card (SPI)...");
+  SPI.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
+
+  if (!SD.begin(PIN_SD_CS))
+  {
+    Serial.println("[WARN] MicroSD Card tidak terdeteksi atau belum dipasang.");
+    Serial.println("[WARN] Sistem tetap berjalan normal tanpa buffer offline.");
+    return false;
+  }
+
+  uint8_t cardType = SD.cardType();
+  if (cardType == CARD_NONE)
+  {
+    Serial.println("[WARN] Slot modul terdeteksi tapi kartu MicroSD belum dimasukkan.");
+    return false;
+  }
+
+  uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+  Serial.printf("[OK] MicroSD Card Siap! Kapasitas: %llu MB\r\n", cardSize);
+  return true;
+}
+
+void saveOfflineData(const char *payload)
+{
+  if (!sdAvailable)
+  {
+    return;
+  }
+
+  File file = SD.open(OFFLINE_DATA_FILE, FILE_APPEND);
+  if (file)
+  {
+    file.println(payload);
+    file.close();
+    Serial.println("[SD] Data telemetri offline tersimpan ke MicroSD.");
+  }
+  else
+  {
+    Serial.println("[SD ERROR] Gagal membuka file untuk menyimpan data offline!");
+  }
+}
+
+void syncOfflineData()
+{
+  if (!sdAvailable)
+  {
+    return;
+  }
+
+  if (!SD.exists(OFFLINE_DATA_FILE))
+  {
+    Serial.println("[SD] Tidak ada data riwayat offline yang perlu disinkronkan.");
+    return;
+  }
+
+  File file = SD.open(OFFLINE_DATA_FILE, FILE_READ);
+  if (!file)
+  {
+    Serial.println("[SD ERROR] Gagal membuka file data offline!");
+    return;
+  }
+
+  Serial.println("\n[SD -> BLE] Memulai sinkronisasi data riwayat offline ke HP...");
+  int recordCount = 0;
+
+  while (file.available() && deviceConnected)
+  {
+    String line = file.readStringUntil('\n');
+    line.trim();
+    if (line.length() > 0)
+    {
+      pCharacteristicTx->setValue((uint8_t *)line.c_str(), line.length());
+      pCharacteristicTx->notify();
+      recordCount++;
+      delay(35); // Jeda singkat agar buffer BLE stack stabil & tidak drop
+    }
+  }
+  file.close();
+
+  // Bersihkan data yang sudah dikirim jika HP masih terhubung
+  if (deviceConnected)
+  {
+    SD.remove(OFFLINE_DATA_FILE);
+    Serial.printf("[SD -> BLE] Sinkronisasi selesai! %d baris data terkirim, file buffer dibersihkan.\n\n", recordCount);
+  }
+  else
+  {
+    Serial.println("[SD -> BLE] Koneksi HP terputus di tengah sinkronisasi! File disimpan untuk dicoba lagi.\n");
+  }
+}
+
 void initBLE()
 {
   Serial.println("[BLE] Menginisialisasi Bluetooth Low Energy...");
@@ -224,6 +375,13 @@ float getAverageTdsADC()
   return (float)tdsSampleSum / (float)NUM_TDS_SAMPLES;
 }
 
+void buildTelemetryJson(char *buffer, size_t maxLen, float temp, float soilPct, int soilRaw, float phVal, float tdsPpm, float ec, bool isCritical)
+{
+  snprintf(buffer, maxLen,
+           "{\"temp\":%.2f,\"soil\":%.1f,\"soilRaw\":%d,\"ph\":%.2f,\"tds\":%.1f,\"ec\":%.1f,\"critical\":%s}",
+           temp, soilPct, soilRaw, phVal, tdsPpm, ec, isCritical ? "true" : "false");
+}
+
 void printDashboard(float temp, int soilRaw, float soilPct, const char *soilStatus, bool isCritical,
                     int phRaw, float phVal, const char *phStatus,
                     float avgTdsADC, float conductivity, float tdsPpm)
@@ -235,22 +393,17 @@ void printDashboard(float temp, int soilRaw, float soilPct, const char *soilStat
   Serial.printf("pH                : %.2f (ADC: %d) [%s]\r\n", phVal, phRaw, phStatus);
   Serial.printf("TDS               : %.1f ppm (Avg ADC: %.1f)\r\n", tdsPpm, avgTdsADC);
   Serial.printf("Conductivity      : %.1f uS/cm\r\n", conductivity);
+  Serial.printf("Status MicroSD    : %s\r\n", sdAvailable ? "Aktif & Siap" : "Tidak Terdeteksi / Nonaktif");
   Serial.printf("Status BLE        : %s\r\n", deviceConnected ? "Terhubung ke HP" : "Menunggu Koneksi");
   Serial.println();
 }
 
-void sendBleTelemetry(float temp, float soilPct, int soilRaw, float phVal, float tdsPpm, float ec, bool isCritical)
+void sendBleTelemetry(const char *payload)
 {
   if (!deviceConnected)
   {
-    return; // Tidak ada HP yang tersambung, hemat siklus pengiriman
+    return;
   }
-
-  // Format JSON
-  char payload[160];
-  snprintf(payload, sizeof(payload),
-           "{\"temp\":%.2f,\"soil\":%.1f,\"soilRaw\":%d,\"ph\":%.2f,\"tds\":%.1f,\"ec\":%.1f,\"critical\":%s}",
-           temp, soilPct, soilRaw, phVal, tdsPpm, ec, isCritical ? "true" : "false");
 
   pCharacteristicTx->setValue((uint8_t *)payload, strlen(payload));
   pCharacteristicTx->notify();

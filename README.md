@@ -1,4 +1,4 @@
-﻿# 🌱 KENDALI — IoT Soil Monitoring Node
+# 🌱 KENDALI — IoT Soil Monitoring Node
 
 > **K**ondisi **E**kosistem **N**irkabel **D**ata **A**nalitik **L**ahan **I**ntelijen
 
@@ -10,16 +10,17 @@ Dibuat untuk **Kompetisi SFT 2026 — Universitas Padjadjaran** 🏆
 
 ## ✨ Fitur Utama
 
-| Fitur | Keterangan |
-|---|---|
-| 🌡️ **Suhu Tanah** | DS18B20 via protokol OneWire, akurasi ±0.5°C |
-| 💧 **Kelembapan Tanah** | Sensor kapasitif (bukan resistif), tahan korosi |
-| 🧪 **pH Tanah** | pH-4502C + probe BNC, range pH 0–14 |
-| ⚗️ **TDS & Konduktivitas (EC)** | Kandungan mineral (ppm) & konduktivitas (µS/cm) |
-| 💡 **LED Peringatan Kritis** | Menyala otomatis jika tanah terlalu kering |
-| 📡 **BLE 5.0** | Kirim data JSON ke HP petani setiap 1 detik |
-| ☀️ **Off-Grid** | Bertenaga surya + baterai 18650, tidak butuh PLN |
-| 🔬 **Simulasi Wokwi** | Tersedia `diagram.json` untuk simulasi sebelum rakit hardware |
+| Fitur                           | Keterangan                                                         |
+| ------------------------------- | ------------------------------------------------------------------ |
+| 🌡️ **Suhu Tanah**               | DS18B20 via protokol OneWire, akurasi ±0.5°C                       |
+| 💧 **Kelembapan Tanah**         | Sensor kapasitif (bukan resistif), tahan korosi                    |
+| 🧪 **pH Tanah**                 | pH-4502C + probe BNC, range pH 0–14                                |
+| ⚗️ **TDS & Konduktivitas (EC)** | Kandungan mineral (ppm) & konduktivitas (µS/cm)                    |
+| 💡 **LED Peringatan Kritis**    | Menyala otomatis jika tanah terlalu kering                         |
+| 📡 **BLE 5.0**                  | Kirim data JSON ke HP petani setiap 1 detik                        |
+| 💾 **MicroSD Offline Buffer**   | Simpan riwayat saat HP terputus, auto-sync & flush saat tersambung |
+| ☀️ **Off-Grid**                 | Bertenaga surya + baterai 18650, tidak butuh PLN                   |
+| 🔬 **Simulasi Wokwi**           | Tersedia `diagram.json` untuk simulasi sebelum rakit hardware      |
 
 ---
 
@@ -34,32 +35,39 @@ Dibuat untuk **Kompetisi SFT 2026 — Universitas Padjadjaran** 🏆
       ↓
 🔄 Buck-Boost Converter → 5.0V stabil
       ↓
-┌─────────────────────────────────────┐
-│       🧠 ESP32-S3 DevKitC-1         │
-│                                     │
-│  GPIO 1 ← 💧 Soil Moisture Sensor  │
-│  GPIO 2 ← 🧪 pH-4502C Sensor       │
-│  GPIO 3 ← ⚗️  TDS & EC Sensor       │
-│  GPIO 4 ← 🌡️  DS18B20 Suhu         │
-│  GPIO 5 → 💡 LED Alert Merah        │
-│  Antena BLE 5.0 ↗️                  │
-└─────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│            🧠 ESP32-S3 DevKitC-1             │
+│                                              │
+│  GPIO 6  ← 💧 Soil Moisture Sensor (ADC)     │
+│  GPIO 7  ← 🧪 pH-4502C Sensor (ADC)          │
+│  GPIO 3  ← ⚗️  TDS & EC Sensor (ADC)          │
+│  GPIO 4  ← 🌡️  DS18B20 Suhu (OneWire)        │
+│  GPIO 5  → 💡 LED Alert Merah                │
+│  SPI Bus ↔ 💾 Modul MicroSD (Offline Buffer) │
+│            (CS:10, MOSI:11, SCK:12, MISO:13) │
+│  Antena BLE 5.0 ↗️                           │
+└──────────────────────────────────────────────┘
                 ↓ BLE (Bluetooth Low Energy)
         📱 HP Petani — Aplikasi KENDALI
-           (Dashboard real-time, notifikasi)
+           (Dashboard real-time, auto-sync data)
 ```
 
 ---
 
 ## 🔧 Hardware & Wiring
 
-| Komponen | Pin ESP32-S3 | Keterangan |
-|---|---|---|
-| DS18B20 (Suhu) | GPIO 4 | OneWire + pull-up 4.7kΩ ke 3.3V |
-| Capacitive Soil Moisture v1.2 | GPIO 1 (ADC1_CH0) | Tegangan 3.3V |
-| pH-4502C (Pin Po) | GPIO 2 (ADC1_CH1) | Board sensor pakai 5V |
-| Sensor TDS/EC | GPIO 3 (ADC1_CH2) | Tegangan 3.3V |
-| LED Merah Alert | GPIO 5 | Seri resistor 220Ω |
+| Komponen                      | Pin ESP32-S3      | Keterangan                      |
+| ----------------------------- | ----------------- | ------------------------------- |
+| DS18B20 (Suhu)                | GPIO 4            | OneWire + pull-up 4.7kΩ ke 3.3V |
+| Capacitive Soil Moisture v1.2 | GPIO 6 (ADC1_CH5) | Tegangan 3.3V                   |
+| pH-4502C (Pin Po)             | GPIO 7 (ADC1_CH6) | Board sensor pakai 5V           |
+| Sensor TDS/EC                 | GPIO 3 (ADC1_CH2) | Tegangan 3.3V                   |
+| LED Merah Alert               | GPIO 5            | Seri resistor 220Ω              |
+| MicroSD Module (CS)           | GPIO 10           | Chip Select (SPI)               |
+| MicroSD Module (MOSI)         | GPIO 11           | Master Out Slave In (SPI)       |
+| MicroSD Module (SCK)          | GPIO 12           | Clock (SPI)                     |
+| MicroSD Module (MISO)         | GPIO 13           | Master In Slave Out (SPI)       |
+| MicroSD Module (VCC/GND)      | 5V / 3.3V & GND   | Sesuai spesifikasi modul SD     |
 
 ---
 
@@ -69,22 +77,22 @@ Data dikirim sebagai JSON setiap **1 detik** via BLE NOTIFY:
 
 ```json
 {
-  "temp": 28.50,
+  "temp": 28.5,
   "soil": 45.2,
   "soilRaw": 1851,
-  "ph": 6.80,
+  "ph": 6.8,
   "tds": 420.5,
   "ec": 675.3,
   "critical": false
 }
 ```
 
-| Parameter BLE | Nilai |
-|---|---|
-| Nama Perangkat | `KENDALI_IoT` |
-| Service UUID | `4fafc201-1fb5-459e-8fcc-c5c9c331914b` |
+| Parameter BLE            | Nilai                                  |
+| ------------------------ | -------------------------------------- |
+| Nama Perangkat           | `KENDALI_IoT`                          |
+| Service UUID             | `4fafc201-1fb5-459e-8fcc-c5c9c331914b` |
 | Characteristic UUID (TX) | `beb5483e-36e1-4688-b7f5-ea07361b26a8` |
-| Mode | READ + NOTIFY |
+| Mode                     | READ + NOTIFY                          |
 
 Kompatibel dengan aplikasi **nRF Connect** atau **Serial Bluetooth Terminal**.
 
@@ -93,6 +101,7 @@ Kompatibel dengan aplikasi **nRF Connect** atau **Serial Bluetooth Terminal**.
 ## 🚀 Cara Pakai
 
 ### Prasyarat
+
 - [PlatformIO IDE](https://platformio.org/) (ekstensi VS Code) atau PlatformIO CLI
 - Board: **ESP32-S3 DevKitC-1**
 
@@ -141,6 +150,7 @@ KENDALI/
 ## 🔬 Tentang Sensor & Formula
 
 ### Kelembapan Tanah
+
 ```
 Kelembapan (%) = (ADC / 4095) × 100
 
@@ -150,6 +160,7 @@ ADC > 2800    → BASAH   🔵
 ```
 
 ### pH Tanah
+
 ```
 pH = (ADC × 14.0) / 4095
 
@@ -159,6 +170,7 @@ pH > 7.5    → BASA   (perlu penyesuaian)
 ```
 
 ### TDS & Konduktivitas (dari regresi linear kalibrasi empiris)
+
 ```
 EC  (µS/cm) = (0.2142 × avgADC) + 494.93
 TDS (ppm)   = (0.3417 × avgADC) + 281.08
@@ -174,4 +186,4 @@ MIT License — bebas digunakan dan dimodifikasi dengan atribusi.
 
 ---
 
-*Dibuat dengan ❤️ untuk petani Indonesia — SFT 2026, hampirgalulusgaragarastempel Universitas Padjadjaran*
+_Dibuat dengan ❤️ untuk petani Indonesia — SFT 2026, hampirgalulusgaragarastempel Universitas Padjadjaran_
