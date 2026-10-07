@@ -1,6 +1,6 @@
 # 🌱 KENDALI — IoT Soil Monitoring Node
 
-> **K**ondisi **E**kosistem **N**irkabel **D**ata **A**nalitik **L**ahan **I**ntelijen
+> **Komputasi Edge Cerdas untuk Lahan dan Irigasi**
 
 Sistem monitoring kesehatan tanah berbasis IoT yang memungkinkan petani memantau kondisi lahan secara **real-time** langsung dari smartphone, **tanpa koneksi internet**, dan **tanpa listrik PLN**.
 
@@ -142,6 +142,7 @@ KENDALI/
 ├── diagram.json                          # Skema simulasi Wokwi
 ├── wokwi.toml                            # Konfigurasi simulator Wokwi
 ├── platformio.ini                        # Konfigurasi build PlatformIO
+├── LICENSE                               # Lisensi MIT
 └── README.md
 ```
 
@@ -162,12 +163,15 @@ ADC > 2800    → BASAH   🔵
 ### pH Tanah
 
 ```
-pH = (ADC × 14.0) / 4095
+V  = (ADC / 4095) × 3.3
+pH = 7.0 + (2.5 − V) / 0.18
 
 pH < 6.5    → ASAM   (perlu pengapuran)
 pH 6.5–7.5  → NETRAL ✅ (ideal)
 pH > 7.5    → BASA   (perlu penyesuaian)
 ```
+
+> Konstanta `PH_NEUTRAL_VOLTAGE` (2.5V) dan `PH_VOLT_PER_UNIT` (0.18) di `src/main.cpp` — kalibrasi ulang dengan larutan buffer pH 4.0 dan pH 7.0.
 
 ### TDS & Konduktivitas (dari regresi linear kalibrasi empiris)
 
@@ -176,7 +180,7 @@ EC  (µS/cm) = (0.2142 × avgADC) + 494.93
 TDS (ppm)   = (0.3417 × avgADC) + 281.08
 ```
 
-> Nilai TDS diambil dari **moving average 20 sampel** setiap 50ms untuk mengurangi noise sensor analog.
+> Nilai TDS & EC dihitung dari **moving average 20 sampel** ADC sensor setiap 50ms untuk mengurangi noise sensor analog.
 
 ---
 
@@ -186,4 +190,4 @@ MIT License — bebas digunakan dan dimodifikasi dengan atribusi.
 
 ---
 
-_Dibuat dengan ❤️ untuk petani Indonesia — SFT 2026, hampirgalulusgaragarastempel Universitas Padjadjaran_
+_Dibuat dengan ❤️ untuk petani Indonesia — SFT 2026, Universitas Padjadjaran_
