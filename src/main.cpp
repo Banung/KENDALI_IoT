@@ -96,6 +96,7 @@ const unsigned long OFFLINE_LOG_INTERVAL = 1000;
 // FUNCTION DECLARATIONS
 void initBLE();
 bool initSD();
+bool sdSpiProbe();
 void saveOfflineData(const char *payload);
 void syncOfflineData();
 void updateTdsBuffer();
@@ -246,12 +247,30 @@ void loop()
 // HELPER FUNCTIONS
 bool initSD()
 {
-  Serial.println("[SD] Menginisialisasi modul MicroSD Card (SPI)...");
+  Serial.println("[SD] Init MicroSD (SPI SCK=GPIO12, MISO=GPIO13, MOSI=GPIO11, CS=GPIO10)...");
+
+  // CS idle HIGH dan MISO pull-up. ESP32-S3-DevKitC-1 TIDAK menyediakan pull-up
+  // eksternal pada bus SPI; internal pull-up (~45k) hanya membantu, belum tentu cukup.
+  pinMode(PIN_SD_CS, OUTPUT);
+  digitalWrite(PIN_SD_CS, HIGH);
+  pinMode(PIN_SD_MISO, INPUT_PULLUP);
+
   SPI.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
 
-  if (!SD.begin(PIN_SD_CS))
+  // Clock rendah saat probing (1 MHz) agar toleran terhadap wiring panjang/noise.
+  if (!SD.begin(PIN_SD_CS, SPI, 1000000))
   {
-    Serial.println("[WARN] MicroSD Card tidak terdeteksi atau belum dipasang.");
+    Serial.println("[WARN] SD.begin() gagal.");
+    if (sdSpiProbe())
+    {
+      Serial.println("[SD] Komunikasi SPI OK (kartu menjawab CMD0).");
+      Serial.println("[SD] -> Kecurigaan FILESYSTEM: format kartu FAT32? (exFAT/NTFS tidak didukung)");
+    }
+    else
+    {
+      Serial.println("[SD] Tidak ada respons SPI dari kartu.");
+      Serial.println("[SD] -> Cek catu daya VCC/GND, MISO/MOSI/SCK/CS, pull-up 10k, level tegangan modul.");
+    }
     Serial.println("[WARN] Sistem tetap berjalan normal tanpa buffer offline.");
     return false;
   }
@@ -266,6 +285,36 @@ bool initSD()
   uint64_t cardSize = SD.cardSize() / (1024 * 1024);
   Serial.printf("[OK] MicroSD Card Siap! Kapasitas: %llu MB\r\n", cardSize);
   return true;
+}
+
+// Diagnostik: kirim perintah CMD0 mentah. Balasan 0x01 = kartu hidup di mode SPI.
+bool sdSpiProbe()
+{
+  digitalWrite(PIN_SD_CS, HIGH);
+  SPI.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
+  for (int i = 0; i < 10; i++)
+  {
+    SPI.transfer(0xFF); // >74 clock dengan CS HIGH -> kartu masuk mode SPI
+  }
+
+  digitalWrite(PIN_SD_CS, LOW);
+  const uint8_t cmd0[6] = {0x40, 0x00, 0x00, 0x00, 0x00, 0x95};
+  for (uint8_t b : cmd0)
+  {
+    SPI.transfer(b);
+  }
+
+  uint8_t r = 0xFF;
+  for (int i = 0; i < 8 && (r & 0x80); i++)
+  {
+    r = SPI.transfer(0xFF);
+  }
+
+  digitalWrite(PIN_SD_CS, HIGH);
+  SPI.transfer(0xFF);
+  SPI.endTransaction();
+
+  return r == 0x01;
 }
 
 void saveOfflineData(const char *payload)
