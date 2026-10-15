@@ -12,7 +12,8 @@
 // PIN DEFINITIONS - SENSORS & ACTUATORS
 #define PIN_DS18B20 4   // OneWire Digital Pin (DS18B20 Temperature)
 #define PIN_SOIL 6      // Analog ADC1_CH5 (Capacitive Soil Moisture)
-#define PIN_PH 7        // Analog ADC1_CH6 (pH-4502C Po Pin)
+#define PIN_PH 7        // Analog ADC1_CH6 (pH Tanah - Probe Buram)
+#define PIN_DMS_PH 14   // Digital Output (Kontrol DMS modul pengkondisi pH tanah)
 #define PIN_TDS 3       // Analog ADC1_CH2 (TDS & Conductivity)
 #define PIN_LED_ALERT 5 // Digital Output (Lampu Peringatan)
 
@@ -22,12 +23,13 @@
 #define PIN_SD_SCK 12  // Serial Clock
 #define PIN_SD_MISO 13 // Master In Slave Out
 
-// pH-4502C KALIBRASI
-// Sesuaikan dua nilai berikut menggunakan larutan buffer pH 4.0 dan pH 7.0
-#define PH_VREF 3.3f // Tegangan referensi ESP32-S3 (volt)
-#define PH_ADC_MAX 4095.0f
-#define PH_NEUTRAL_VOLTAGE 2.5f // Tegangan output sensor saat pH = 7.0
-#define PH_VOLT_PER_UNIT 0.18f  // Volt per unit pH (~0.17–0.20, kalibrasi)
+// pH TANAH (Probe Buram + modul pengkondisi DMS) KALIBRASI
+// Regresi linier dari vendor, dikalibrasi untuk ADC 10-bit (0–1023).
+#define PH_SLOPE (-0.0333f)      // Slope regresi ADC -> pH
+#define PH_INTERCEPT 9.8340f     // Intercept regresi ADC -> pH
+#define PH_ADC12_TO_10 4.0f      // Konversi ADC 12-bit -> ekuivalen 10-bit
+#define PH_DMS_WARMUP_MS 10000UL // DMS ON -> tunggu stabil sebelum baca
+#define PH_DMS_REST_MS 3000UL    // DMS OFF -> istirahat sebelum siklus berikut
 
 // BLE DEFINITIONS
 #define BLE_DEVICE_NAME "KENDALI_IoT"
@@ -42,6 +44,17 @@ bool oldDeviceConnected = false;
 // MICROSD OFFLINE BUFFER DEFINITIONS
 const char *OFFLINE_DATA_FILE = "/offline_data.txt";
 bool sdAvailable = false;
+
+// pH TANAH STATE (siklus non-blocking via modul DMS)
+enum PhCycleState
+{
+  PH_RESTING, // DMS OFF, jeda istirahat
+  PH_WARMING  // DMS ON, menunggu sensor stabil
+};
+PhCycleState phCycleState = PH_RESTING;
+unsigned long phCycleSince = 0;
+int phRaw = 0;
+float phValue = 0.0f;
 
 class MyServerCallbacks : public BLEServerCallbacks
 {
@@ -87,6 +100,7 @@ void saveOfflineData(const char *payload);
 void syncOfflineData();
 void updateTdsBuffer();
 float getAverageTdsADC();
+void updatePhSensor();
 void buildTelemetryJson(char *buffer, size_t maxLen, float temp, float soilPct, int soilRaw, float phVal, float tdsPpm, float ec, bool isCritical);
 void printDashboard(float temp, int soilRaw, float soilPct, const char *soilStatus, bool isCritical,
                     int phRaw, float phVal, const char *phStatus,
@@ -115,6 +129,11 @@ void setup()
   analogReadResolution(12);
   Serial.println("[OK] ADC Analog Siap (Soil: GPIO 6, pH: GPIO 7, TDS: GPIO 3)");
 
+  // Soil pH Sensor (Probe Buram + DMS conditioning module)
+  pinMode(PIN_DMS_PH, OUTPUT);
+  digitalWrite(PIN_DMS_PH, HIGH); // DMS OFF saat boot
+  Serial.println("[OK] pH Tanah Siap (ADC GPIO 7 - DMS GPIO 14)");
+
   // TDS buffer
   for (int i = 0; i < NUM_TDS_SAMPLES; i++)
   {
@@ -132,6 +151,9 @@ void setup()
 void loop()
 {
   unsigned long currentMillis = millis();
+
+  // Update siklus pH tanah (non-blocking)
+  updatePhSensor();
 
   // Handle BLE reconnection when disconnected
   if (!deviceConnected && oldDeviceConnected)
@@ -175,17 +197,7 @@ void loop()
     // Kontrol Lampu Peringatan
     digitalWrite(PIN_LED_ALERT, isCritical ? HIGH : LOW);
 
-    // Read pH Sensor (pH-4502C)
-    // Konversi ADC → Tegangan → pH menggunakan konstanta kalibrasi di atas
-    int phRaw = analogRead(PIN_PH);
-    float phVoltage = ((float)phRaw / PH_ADC_MAX) * PH_VREF;
-    float phValue = 7.0f + ((PH_NEUTRAL_VOLTAGE - phVoltage) / PH_VOLT_PER_UNIT);
-    // Clamp ke range valid pH (0–14)
-    if (phValue < 0.0f)
-      phValue = 0.0f;
-    if (phValue > 14.0f)
-      phValue = 14.0f;
-
+    // pH Tanah — nilai terakhir hasil siklus DMS (diperbarui di updatePhSensor())
     const char *phStatus;
     if (phValue < 6.5)
     {
@@ -373,6 +385,45 @@ void updateTdsBuffer()
 float getAverageTdsADC()
 {
   return (float)tdsSampleSum / (float)NUM_TDS_SAMPLES;
+}
+
+// Siklus pembacaan pH tanah non-blocking sesuai workflow vendor:
+// DMS ON -> tunggu 10s stabil -> baca ADC -> konversi regresi -> DMS OFF -> tunggu 3s.
+void updatePhSensor()
+{
+  unsigned long now = millis();
+
+  if (phCycleState == PH_RESTING)
+  {
+    if (now - phCycleSince >= PH_DMS_REST_MS)
+    {
+      digitalWrite(PIN_DMS_PH, LOW); // DMS ON (active LOW)
+      phCycleState = PH_WARMING;
+      phCycleSince = now;
+    }
+    return;
+  }
+
+  // PH_WARMING
+  if (now - phCycleSince >= PH_DMS_WARMUP_MS)
+  {
+    phRaw = analogRead(PIN_PH);
+
+    // Formula vendor dikalibrasi untuk ADC 10-bit; konversi dari 12-bit.
+    float adc10 = (float)phRaw / PH_ADC12_TO_10;
+    float value = (PH_SLOPE * adc10) + PH_INTERCEPT;
+
+    // Di luar rentang valid pH (0–14) -> dianggap tidak valid.
+    if (value < 0.0f || value > 14.0f)
+    {
+      value = 0.0f;
+    }
+    phValue = value;
+
+    digitalWrite(PIN_DMS_PH, HIGH); // DMS OFF
+    phCycleState = PH_RESTING;
+    phCycleSince = now;
+  }
 }
 
 void buildTelemetryJson(char *buffer, size_t maxLen, float temp, float soilPct, int soilRaw, float phVal, float tdsPpm, float ec, bool isCritical)

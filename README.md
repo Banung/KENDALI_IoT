@@ -14,13 +14,12 @@ Dibuat untuk **Kompetisi SFT 2026 — Universitas Padjadjaran** 🏆
 | ------------------------------- | ------------------------------------------------------------------ |
 | 🌡️ **Suhu Tanah**               | DS18B20 via protokol OneWire, akurasi ±0.5°C                       |
 | 💧 **Kelembapan Tanah**         | Sensor kapasitif (bukan resistif), tahan korosi                    |
-| 🧪 **pH Tanah**                 | pH-4502C + probe BNC, range pH 0–14                                |
+| 🧪 **pH Tanah**                 | Probe pH tanah Buram + modul DMS, range pH 0–14                    |
 | ⚗️ **TDS & Konduktivitas (EC)** | Kandungan mineral (ppm) & konduktivitas (µS/cm)                    |
 | 💡 **LED Peringatan Kritis**    | Menyala otomatis jika tanah terlalu kering                         |
 | 📡 **BLE 5.0**                  | Kirim data JSON ke HP petani setiap 1 detik                        |
 | 💾 **MicroSD Offline Buffer**   | Simpan riwayat saat HP terputus, auto-sync & flush saat tersambung |
 | ☀️ **Off-Grid**                 | Bertenaga surya + baterai 18650, tidak butuh PLN                   |
-| 🔬 **Simulasi Wokwi**           | Tersedia `diagram.json` untuk simulasi sebelum rakit hardware      |
 
 ---
 
@@ -39,7 +38,8 @@ Dibuat untuk **Kompetisi SFT 2026 — Universitas Padjadjaran** 🏆
 │            🧠 ESP32-S3 DevKitC-1             │
 │                                              │
 │  GPIO 6  ← 💧 Soil Moisture Sensor (ADC)     │
-│  GPIO 7  ← 🧪 pH-4502C Sensor (ADC)          │
+│  GPIO 7  ← 🧪 pH Tanah Buram (ADC)           │
+│  GPIO 14 → 🔌 Kontrol DMS pH Tanah           │
 │  GPIO 3  ← ⚗️  TDS & EC Sensor (ADC)          │
 │  GPIO 4  ← 🌡️  DS18B20 Suhu (OneWire)        │
 │  GPIO 5  → 💡 LED Alert Merah                │
@@ -60,7 +60,8 @@ Dibuat untuk **Kompetisi SFT 2026 — Universitas Padjadjaran** 🏆
 | ----------------------------- | ----------------- | ------------------------------- |
 | DS18B20 (Suhu)                | GPIO 4            | OneWire + pull-up 4.7kΩ ke 3.3V |
 | Capacitive Soil Moisture v1.2 | GPIO 6 (ADC1_CH5) | Tegangan 3.3V                   |
-| pH-4502C (Pin Po)             | GPIO 7 (ADC1_CH6) | Board sensor pakai 5V           |
+| Probe pH Tanah Buram          | GPIO 7 (ADC1_CH6) | Output analog ke ADC            |
+| Modul DMS pH Tanah            | GPIO 14           | Kontrol daya sensor (aktif LOW) |
 | Sensor TDS/EC                 | GPIO 3 (ADC1_CH2) | Tegangan 3.3V                   |
 | LED Merah Alert               | GPIO 5            | Seri resistor 220Ω              |
 | MicroSD Module (CS)           | GPIO 10           | Chip Select (SPI)               |
@@ -127,20 +128,15 @@ pio device monitor
 
 > **Catatan:** Port USB akan terdeteksi otomatis. Jika tidak, tambahkan `upload_port = COMx` (Windows) atau `upload_port = /dev/ttyUSBx` (Linux/Mac) ke `platformio.ini` sesuai port kamu.
 
-### 3. Simulasi Wokwi (tanpa hardware)
-
-Buka proyek ini di [Wokwi](https://wokwi.com/) menggunakan `diagram.json` dan `wokwi.toml` yang sudah tersedia. Putar potentiometer untuk mensimulasikan nilai sensor.
-
----
-
 ## 📁 Struktur Folder
 
 ```
 KENDALI/
 ├── src/
-│   └── main.cpp                          # Firmware utama ESP32-S3
-├── diagram.json                          # Skema simulasi Wokwi
-├── wokwi.toml                            # Konfigurasi simulator Wokwi
+│   └── main.cpp                          # Firmware utama ESP32-S3 (PlatformIO)
+├── docs/                                 # Referensi sensor pH tanah
+│   ├── sensorPhTanah_vendor.cpp          # Source asli dari vendor sensor
+│   └── workflow_sensor_ph_tanah.md       # Workflow vendor sensor pH tanah
 ├── platformio.ini                        # Konfigurasi build PlatformIO
 ├── LICENSE                               # Lisensi MIT
 └── README.md
@@ -160,18 +156,18 @@ ADC 1200–2800 → NORMAL  🟢
 ADC > 2800    → BASAH   🔵
 ```
 
-### pH Tanah
+### pH Tanah (Probe Buram + modul DMS)
 
 ```
-V  = (ADC / 4095) × 3.3
-pH = 7.0 + (2.5 − V) / 0.18
+ADC10 = ADC12 / 4                  (ekuivalen 10-bit dari pembacaan 12-bit)
+pH    = (−0.0333 × ADC10) + 9.8340
 
 pH < 6.5    → ASAM   (perlu pengapuran)
 pH 6.5–7.5  → NETRAL ✅ (ideal)
 pH > 7.5    → BASA   (perlu penyesuaian)
 ```
 
-> Konstanta `PH_NEUTRAL_VOLTAGE` (2.5V) dan `PH_VOLT_PER_UNIT` (0.18) di `src/main.cpp` — kalibrasi ulang dengan larutan buffer pH 4.0 dan pH 7.0.
+> Pembacaan **non-blocking** berdurasi ~13 detik: DMS ON → tunggu 10 dtk stabil → baca ADC → DMS OFF → istirahat 3 dtk. Konstanta `PH_SLOPE`, `PH_INTERCEPT`, `PH_DMS_WARMUP_MS`, `PH_DMS_REST_MS` di `src/main.cpp`. Syarat: tanah lembap & padat, ujung probe ≥8 cm.
 
 ### TDS & Konduktivitas (dari regresi linear kalibrasi empiris)
 
