@@ -8,6 +8,7 @@
 #include <SPI.h>
 #include <SD.h>
 #include <FS.h>
+#include "driver/gpio.h"
 
 // PIN DEFINITIONS - SENSORS & ACTUATORS
 #define PIN_DS18B20 4   // OneWire Digital Pin (DS18B20 Temperature)
@@ -249,16 +250,21 @@ bool initSD()
 {
   Serial.println("[SD] Init MicroSD (SPI SCK=GPIO12, MISO=GPIO13, MOSI=GPIO11, CS=GPIO10)...");
 
-  // CS idle HIGH dan MISO pull-up. ESP32-S3-DevKitC-1 TIDAK menyediakan pull-up
+  // CS idle HIGH sebelum init. ESP32-S3-DevKitC-1 TIDAK menyediakan pull-up
   // eksternal pada bus SPI; internal pull-up (~45k) hanya membantu, belum tentu cukup.
   pinMode(PIN_SD_CS, OUTPUT);
   digitalWrite(PIN_SD_CS, HIGH);
-  pinMode(PIN_SD_MISO, INPUT_PULLUP);
 
   SPI.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
 
-  // Clock rendah saat probing (1 MHz) agar toleran terhadap wiring panjang/noise.
-  if (!SD.begin(PIN_SD_CS, SPI, 1000000))
+  // SPI.begin() memasang MISO ke periferal sehingga pull-up dari pinMode() bisa hilang.
+  // Aktifkan pull-up via GPIO pad API (tak mengubah fungsi periferal).
+  // ESP32-S3-DevKitC-1 tidak punya pull-up eksternal di bus SPI; internal (~45k) sering
+  // belum cukup -> MISO floating -> "Select Failed". Idealnya tetap tambah 10k ke 3.3V.
+  gpio_set_pull_mode((gpio_num_t)PIN_SD_MISO, GPIO_PULLUP_ONLY);
+
+  // Clock rendah saat probing. Catatan: SD lib tetap pakai 400 kHz ketika init.
+  if (!SD.begin(PIN_SD_CS, SPI, 400000))
   {
     Serial.println("[WARN] SD.begin() gagal.");
     if (sdSpiProbe())
